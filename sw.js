@@ -1,6 +1,6 @@
 // オフラインでもアプリを開けるようにするキャッシュ
 // アプリを更新したら VERSION を上げてください
-const VERSION = "koememo-v1";
+const VERSION = "koememo-v2";
 const APP_FILES = [
   "./", "index.html", "styles.css", "app.js", "config.js", "manifest.webmanifest",
   "icons/icon.svg", "icons/icon-180.png", "icons/icon-192.png", "icons/icon-512.png",
@@ -47,4 +47,31 @@ self.addEventListener("fetch", (e) => {
     );
   }
   // それ以外（Supabase など）はそのまま通信
+});
+
+// ---------- プッシュ通知 ----------
+self.addEventListener("push", (e) => {
+  let data = {};
+  try { data = e.data ? e.data.json() : {}; } catch { data = { body: e.data?.text() }; }
+  e.waitUntil(self.registration.showNotification(data.title || "こえメモ", {
+    body: data.body || "",
+    icon: "icons/icon-192.png",
+    badge: "icons/icon-192.png",
+    data: { url: data.url || "./" },
+  }));
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = new URL(e.notification.data?.url || "./", self.registration.scope).href;
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const w of wins) {
+      if (w.url.startsWith(self.registration.scope)) {
+        await w.focus();
+        return w.navigate(url);
+      }
+    }
+    return self.clients.openWindow(url);
+  })());
 });

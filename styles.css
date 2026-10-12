@@ -153,7 +153,7 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 .sheet { padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 .sheet h2 { margin: 0; font-size: 18px; }
 .sheet h3 { margin: 8px 0 0; font-size: 14px; color: var(--muted); }
-.sheet input[type=email], .sheet input[type=password], .sheet textarea {
+.sheet input[type=email], .sheet input[type=password], .sheet input[type=text], .sheet textarea {
   width: 100%; padding: 10px; font-size: 16px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--bg); color: var(--text); font-family: inherit;
 }

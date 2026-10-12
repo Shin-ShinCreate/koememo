@@ -113,6 +113,39 @@ Netlify や Cloudflare Pages に、フォルダをドラッグ＆ドロップし
 
 ---
 
+## リマインダー通知とショートカット
+
+### 準備（Supabase）
+1. SQL Editor で `supabase/reminders.sql` を実行
+2. Edge Functions → Secrets に `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `CRON_SECRET` を追加
+   （VAPID 鍵は Node.js の `crypto.createECDH("prime256v1")` などで作成。公開鍵は `config.js` にも書く）
+3. `ai-memo` 関数のコードを最新の `index.ts` に差し替えて再デプロイ
+4. SQL Editor で次を実行し、5 分おきに期限を確認させる（`<CRON_SECRET>` は 2 と同じ値）
+   ```sql
+   select cron.schedule('koememo-reminders', '*/5 * * * *', $$
+     select net.http_post(
+       url := 'https://<プロジェクトID>.supabase.co/functions/v1/ai-memo',
+       headers := jsonb_build_object('Content-Type', 'application/json', 'x-cron-secret', '<CRON_SECRET>'),
+       body := '{}'::jsonb);
+   $$);
+   ```
+
+### 通知をオンにする（iPhone）
+ホーム画面のアプリで「⋯」→「この端末で通知をオンにする」→ 許可。「テスト通知」で届くか確認できます。
+時刻のある ToDo は 30 分前、日付だけの ToDo は当日朝 8 時に通知されます（`index.ts` の `LEAD_MINUTES` / `DATE_ONLY_TIME` で変更可）。
+
+### ロック画面から話して追加（ショートカット）
+1. アプリの「⋯」→「鍵を発行する」で鍵をコピー
+2. 「ショートカット」アプリで新規作成し、次のアクションを並べる
+   - 「音声入力」（言語: 日本語）
+   - 「URLの内容を取得」: URL は `https://<プロジェクトID>.supabase.co/functions/v1/ai-memo`、
+     方法 POST、ヘッダ `x-koememo-token` = 鍵、本文 JSON で `text` = 音声入力したテキスト
+   - 「結果を表示」
+3. ロック画面を長押し →「カスタマイズ」→ 下のボタンに「ショートカット」を設定（iOS 18 以降）
+   コントロールセンターやアクションボタンにも置けます
+
+---
+
 ## 費用の目安
 
 - Supabase・GitHub Pages：個人利用なら無料枠で収まります

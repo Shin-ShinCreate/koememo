@@ -1,4 +1,4 @@
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
+import { SUPABASE_URL, SUPABASE_ANON_KEY, VAPID_PUBLIC_KEY } from "./config.js";
 import Fuse from "https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.mjs";
 
 // ---------- Supabase（設定があるときだけ有効） ----------
@@ -195,8 +195,11 @@ async function errorMessage(error) {
 // 再解析しても、同じ内容の ToDo の完了状態は引き継ぐ
 function mergeTodos(oldTodos, newTodos) {
   const doneSet = new Set(oldTodos.filter((t) => t.done).map((t) => t.text));
-  return newTodos.map((t) => ({ text: t.text, due: t.due || "", done: doneSet.has(t.text) }));
+  return newTodos.map((t) => ({ text: t.text, due: t.due || "", time: t.time || "", done: doneSet.has(t.text) }));
 }
+
+// 「2026-10-13 10:00」のような期限表示
+const dueLabel = (t) => [t.due, t.time].filter(Boolean).join(" ");
 
 // ---------- あいまい検索 ----------
 // 全角/半角・大文字/小文字・カタカナ/ひらがなの違いを吸収する
@@ -307,7 +310,7 @@ function cardHTML(m, showDate) {
   const tags = m.tags.length
     ? `<div class="tags">${m.tags.map((t) => `<button class="tag" data-act="tag" data-tag="${esc(t)}">#${esc(t)}</button>`).join("")}</div>` : "";
   const todos = m.todos.length
-    ? `<ul class="mini-todos">${m.todos.map((t) => `<li class="${t.done ? "done" : ""}">${esc(t.text)}${t.due ? `（${esc(t.due)}）` : ""}</li>`).join("")}</ul>` : "";
+    ? `<ul class="mini-todos">${m.todos.map((t) => `<li class="${t.done ? "done" : ""}">${esc(t.text)}${t.due ? `（${esc(dueLabel(t))}）` : ""}</li>`).join("")}</ul>` : "";
   return `
     <article class="card ${m.pinned ? "pinned" : ""}">
       <div class="card-head">
@@ -329,7 +332,7 @@ function collectTodos() {
 function renderTodos() {
   const all = collectTodos();
   const open = all.filter((t) => !t.done)
-    .sort((a, b) => (a.due || "9999").localeCompare(b.due || "9999"));
+    .sort((a, b) => (a.due ? dueLabel(a) : "9999").localeCompare(b.due ? dueLabel(b) : "9999"));
   const done = all.filter((t) => t.done);
   const badge = $("#todoCount");
   badge.hidden = !open.length;
@@ -344,7 +347,7 @@ function renderTodos() {
       <input type="checkbox" data-act="todo" data-id="${t.memo.id}" data-index="${t.index}" ${t.done ? "checked" : ""}>
       <div class="body">
         <div class="text">${esc(t.text)}</div>
-        ${t.due ? `<div class="due ${!t.done && t.due < today ? "overdue" : ""}">期限: ${esc(t.due)}</div>` : ""}
+        ${t.due ? `<div class="due ${!t.done && t.due < today ? "overdue" : ""}">期限: ${esc(dueLabel(t))}</div>` : ""}
         <button class="src" data-act="edit" data-id="${t.memo.id}">元のメモ（${esc(formatDateTime(t.memo.created_at))}）</button>
       </div>
     </div>`;
@@ -566,9 +569,18 @@ function renderAccount() {
       <div class="btn-row">
         <button type="button" id="syncNow">今すぐ同期</button>
         <button type="button" id="logout">ログアウト</button>
-      </div>`;
+      </div>
+      <h3>ToDo のリマインダー通知</h3>
+      <p class="muted">時刻ありは30分前、日付だけなら当日朝8時にお知らせします。</p>
+      <div class="btn-row" id="pushBox"><span class="muted">確認中…</span></div>
+      <h3>ショートカット（ロック画面から追加）</h3>
+      <p class="muted">iPhone の「ショートカット」アプリに設定する鍵を発行します。発行し直すと古い鍵は使えなくなります。</p>
+      <div class="btn-row"><button type="button" id="issueToken">鍵を発行する</button></div>
+      <div id="tokenBox"></div>`;
     $("#syncNow").onclick = () => { sync(); toast("同期しています"); };
     $("#logout").onclick = logout;
+    $("#issueToken").onclick = issueToken;
+    renderPushBox();
     return;
   }
   box.innerHTML = `
@@ -591,6 +603,106 @@ function renderAccount() {
     if (error) return toast("登録できませんでした: " + error.message, 5000);
     if (!data.session) toast("確認メールを送りました。メール内のリンクを開いてからログインしてください", 7000);
     else { menuDialog.close(); toast("登録しました"); }
+  };
+}
+
+// ---------- リマインダー通知 ----------
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+const isStandalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const pushSupported = "Notification" in window && "PushManager" in window && "serviceWorker" in navigator;
+
+function b64urlToBytes(s) {
+  const b64 = (s + "=".repeat((4 - (s.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+async function currentSubscription() {
+  if (!pushSupported) return null;
+  const reg = await navigator.serviceWorker.ready;
+  return reg.pushManager.getSubscription();
+}
+
+async function renderPushBox() {
+  const box = $("#pushBox");
+  if (!box) return;
+  if (!pushSupported) {
+    box.innerHTML = `<span class="muted">${isIOS && !isStandalone
+      ? "ホーム画面に追加したアプリから開くと、通知をオンにできます。"
+      : "このブラウザは通知に対応していません。"}</span>`;
+    return;
+  }
+  const sub = await currentSubscription();
+  if (sub && Notification.permission === "granted") {
+    box.innerHTML = `<span class="muted">この端末: オン</span>
+      <button type="button" id="testPush">テスト通知</button>
+      <button type="button" id="disablePush">オフにする</button>`;
+    $("#testPush").onclick = testPush;
+    $("#disablePush").onclick = disablePush;
+  } else {
+    box.innerHTML = `<button type="button" id="enablePush" class="primary">この端末で通知をオンにする</button>`;
+    $("#enablePush").onclick = enablePush;
+  }
+}
+
+async function enablePush() {
+  // iPhone では、ボタンを押した直後に許可を求める必要がある
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") {
+    toast("通知が許可されませんでした。iPhone の「設定」→「通知」→「こえメモ」から許可できます", 6000);
+    return;
+  }
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = (await reg.pushManager.getSubscription()) ||
+      (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlToBytes(VAPID_PUBLIC_KEY) }));
+    const j = sub.toJSON();
+    const { error } = await supabase.from("push_subscriptions")
+      .upsert({ endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth });
+    if (error) throw error;
+    toast("通知をオンにしました");
+  } catch (e) {
+    console.error(e);
+    toast("通知をオンにできませんでした: " + (e.message || e), 6000);
+  }
+  renderPushBox();
+}
+
+async function disablePush() {
+  const sub = await currentSubscription();
+  if (sub) {
+    await supabase.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+    await sub.unsubscribe();
+  }
+  toast("この端末の通知をオフにしました");
+  renderPushBox();
+}
+
+async function testPush() {
+  const { error } = await supabase.functions.invoke("ai-memo", { body: { action: "test-push" } });
+  toast(error ? "送れませんでした: " + (await errorMessage(error)) : "テスト通知を送りました", 5000);
+}
+
+// ---------- ショートカット用の鍵 ----------
+async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function issueToken() {
+  if (!confirm("ショートカット用の鍵を発行しますか？（前に発行した鍵は使えなくなります）")) return;
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  const token = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  await supabase.from("quick_tokens").delete().eq("user_id", session.user.id);
+  const { error } = await supabase.from("quick_tokens").insert({ token_hash: await sha256Hex(token) });
+  if (error) return toast("発行できませんでした: " + error.message, 6000);
+  $("#tokenBox").innerHTML = `
+    <p class="muted">この鍵はこの画面でしか表示されません。ショートカットの設定に貼り付けてください。</p>
+    <input type="text" id="tokenValue" readonly value="${esc(token)}">
+    <div class="btn-row"><button type="button" id="copyToken">鍵をコピー</button></div>
+    <p class="muted">送信先URL: ${esc(SUPABASE_URL)}/functions/v1/ai-memo</p>`;
+  $("#copyToken").onclick = async () => {
+    try { await navigator.clipboard.writeText(token); toast("コピーしました"); }
+    catch { $("#tokenValue").select(); toast("選択しました。コピーしてください"); }
   };
 }
 
@@ -619,7 +731,7 @@ function exportAs(kind) {
     body = `# こえメモ（${stamp} 書き出し）\n\n` + list.map((m) => {
       let s = `## ${formatDateTime(m.created_at)}${m.pinned ? " 📌" : ""}\n\n${m.text}\n`;
       if (m.is_question && m.answer) s += `\n> **AIの回答**\n>\n${m.answer.split("\n").map((l) => "> " + l).join("\n")}\n`;
-      if (m.todos.length) s += "\n" + m.todos.map((t) => `- [${t.done ? "x" : " "}] ${t.text}${t.due ? `（期限 ${t.due}）` : ""}`).join("\n") + "\n";
+      if (m.todos.length) s += "\n" + m.todos.map((t) => `- [${t.done ? "x" : " "}] ${t.text}${t.due ? `（期限 ${dueLabel(t)}）` : ""}`).join("\n") + "\n";
       if (m.tags.length) s += `\n${m.tags.map((t) => "#" + t).join(" ")}\n`;
       return s;
     }).join("\n");
@@ -674,6 +786,8 @@ if ("serviceWorker" in navigator) {
 
 render();
 updateStatus();
+// 通知から開いたときは ToDo タブを表示
+if (new URLSearchParams(location.search).get("view") === "todos") switchView("todos");
 
 if (supabase) {
   const { data } = await supabase.auth.getSession();
