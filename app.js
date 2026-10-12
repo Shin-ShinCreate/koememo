@@ -370,6 +370,8 @@ function updateStatus() {
 let toastTimer;
 function toast(msg, ms = 3000) {
   const el = $("#toast");
+  // メニューなどのダイアログが開いていると裏に隠れるので、ダイアログの中に移して表示する
+  (document.querySelector("dialog[open]") || document.body).appendChild(el);
   el.textContent = msg;
   el.hidden = false;
   clearTimeout(toastTimer);
