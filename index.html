@@ -26,12 +26,14 @@
     <nav class="tabs" role="tablist">
       <button class="tab active" data-view="memos" role="tab">メモ</button>
       <button class="tab" data-view="todos" role="tab">ToDo <span id="todoCount" class="badge" hidden></span></button>
+      <button class="tab" data-view="money" role="tab">家計</button>
     </nav>
   </header>
 
   <main id="main">
     <section id="memosView"></section>
     <section id="todosView" hidden></section>
+    <section id="moneyView" hidden></section>
   </main>
 
   <footer class="composer">
@@ -57,6 +59,15 @@
         <button type="button" data-export="json">JSON</button>
       </div>
       <h3>表示</h3>
+      <div class="size-row" role="group" aria-label="メモの文字の大きさ">
+        <span class="size-label">文字の大きさ</span>
+        <div class="seg" id="fontSizeSeg">
+          <button type="button" data-scale="0.85">小</button>
+          <button type="button" data-scale="1">標準</button>
+          <button type="button" data-scale="1.2">大</button>
+          <button type="button" data-scale="1.4">特大</button>
+        </div>
+      </div>
       <label class="check"><input type="checkbox" id="autoSaveVoice"> 録音を止めたら自動で保存する</label>
       <div class="btn-row end"><button value="close">閉じる</button></div>
     </form>

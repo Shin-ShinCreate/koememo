@@ -17,6 +17,19 @@ let session = null;
 const LS_MEMOS = "koememo.memos.v1";
 const LS_CURSOR = "koememo.cursor.v1";
 const LS_AUTOSAVE = "koememo.autosave";
+const LS_FONT_SCALE = "koememo.fontScale";
+
+// メモの文字の大きさ（端末ごとに保存。0.85 / 1 / 1.2 / 1.4）
+function applyFontScale(scale) {
+  document.documentElement.style.setProperty("--memo-scale", scale);
+  document.querySelectorAll("#fontSizeSeg button").forEach((b) =>
+    b.classList.toggle("on", Number(b.dataset.scale) === Number(scale)));
+}
+applyFontScale(localStorage.getItem(LS_FONT_SCALE) || "1");
+document.querySelectorAll("#fontSizeSeg button").forEach((b) => b.addEventListener("click", () => {
+  localStorage.setItem(LS_FONT_SCALE, b.dataset.scale);
+  applyFontScale(b.dataset.scale);
+}));
 
 let memos = loadMemos();
 
@@ -44,6 +57,7 @@ function newMemo(text) {
     tags: [],
     keywords: [],
     todos: [],
+    expenses: null, // null = まだ金額を読み取っていない
   };
 }
 
@@ -58,7 +72,7 @@ function touch(m) {
 }
 
 const COLUMNS = ["id", "text", "created_at", "updated_at", "pinned", "deleted", "ai_status", "ai_error",
-  "is_question", "answer", "summary", "tags", "keywords", "todos"];
+  "is_question", "answer", "summary", "tags", "keywords", "todos", "expenses"];
 
 function toRow(m) {
   const row = {};
@@ -72,6 +86,7 @@ function fromRow(r) {
   m.updated_at = new Date(r.updated_at).toISOString();
   m.tags ||= []; m.keywords ||= []; m.todos ||= [];
   m.text ||= ""; m.answer ||= ""; m.summary ||= "";
+  m.expenses ??= null;
   return m;
 }
 
@@ -176,6 +191,7 @@ async function processAI() {
         cur.tags = data.tags || [];
         cur.keywords = data.keywords || [];
         cur.todos = mergeTodos(cur.todos, data.todos || []);
+        cur.expenses = data.expenses || [];
       }
       touch(cur);
     }
@@ -208,38 +224,83 @@ function norm(s) {
     .replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
 }
 
+const searchTokens = (query) => norm(query).split(/\s+/).filter(Boolean);
+
+// 検索：1) 中身にその文字を含むメモ（確実に見つかる）2) 表記ゆれ・打ち間違いの似ている候補
+// スペース区切りの語は、すべて含むもの（AND）
 function search(list, query) {
-  const docs = list.map((m) => ({
-    m,
-    t: norm(m.text),
-    s: norm(m.summary),
-    g: norm([...m.tags, ...m.keywords].join(" ")),
-    a: norm(m.answer),
-    d: formatDateTime(m.created_at) + " " + m.created_at.slice(0, 10),
-  }));
-  const fuse = new Fuse(docs, {
-    keys: [
-      { name: "t", weight: 0.45 },
-      { name: "g", weight: 0.25 },
-      { name: "s", weight: 0.15 },
-      { name: "a", weight: 0.1 },
-      { name: "d", weight: 0.05 },
-    ],
-    threshold: 0.4,
-    ignoreLocation: true,
-    includeScore: true,
+  const tokens = searchTokens(query);
+  const docs = list.map((m) => {
+    const d = {
+      m,
+      t: norm(m.text),
+      s: norm(m.summary),
+      g: norm([...m.tags, ...m.keywords].join(" ")),
+      a: norm(m.answer + " " + m.todos.map((t) => t.text).join(" ") + " " +
+        (m.expenses || []).map((e) => `${e.item} ${e.shop}`).join(" ")),
+      d: norm(formatDateTime(m.created_at) + " " + m.created_at.slice(0, 10)),
+    };
+    d.all = [d.t, d.s, d.g, d.a, d.d].join("\n");
+    return d;
   });
-  // スペース区切りの語はすべて含むもの（AND）
-  const tokens = norm(query).split(/\s+/).filter(Boolean);
-  let scores = null;
+
+  // 1) 完全一致：本文に含むものを先に、次に要約・タグ・回答などに含むもの
+  const exact = docs.filter((d) => tokens.every((tok) => d.all.includes(tok)))
+    .sort((x, y) => Number(tokens.every((tok) => y.t.includes(tok))) - Number(tokens.every((tok) => x.t.includes(tok))));
+  const exactIds = new Set(exact.map((d) => d.m.id));
+
+  // 2) あいまい一致（日付は対象外。1文字の語では行わない）
+  let fuzzy = [];
+  if (tokens.every((tok) => tok.length >= 2)) {
+    const rest = docs.filter((d) => !exactIds.has(d.m.id));
+    const fuse = new Fuse(rest, {
+      keys: [
+        { name: "t", weight: 0.5 },
+        { name: "g", weight: 0.25 },
+        { name: "s", weight: 0.15 },
+        { name: "a", weight: 0.1 },
+      ],
+      threshold: 0.3,
+      ignoreLocation: true,
+      includeScore: true,
+    });
+    let scores = null;
+    for (const tok of tokens) {
+      const hit = new Map(fuse.search(tok).map((r) => [r.item.m.id, r.score]));
+      if (!scores) scores = hit;
+      else for (const id of [...scores.keys()]) {
+        if (hit.has(id)) scores.set(id, scores.get(id) + hit.get(id)); else scores.delete(id);
+      }
+    }
+    fuzzy = [...(scores || new Map()).entries()].sort((a, b) => a[1] - b[1]).map(([id]) => memos[id]);
+  }
+  return { exact: exact.map((d) => d.m), fuzzy };
+}
+
+// 検索語に一致した部分を <mark> で囲む（表記ゆれを吸収して元の文字に色を付ける）
+function highlight(text, tokens) {
+  if (!tokens.length) return esc(text);
+  const chars = [...text];
+  const normChars = chars.map((c) => norm(c));
+  const joined = normChars.join("");
+  // 正規化後の位置 → 元の文字の番号
+  const owner = [];
+  normChars.forEach((n, i) => { for (let k = 0; k < n.length; k++) owner.push(i); });
+  const marked = new Array(chars.length).fill(false);
   for (const tok of tokens) {
-    const hit = new Map(fuse.search(tok).map((r) => [r.item.m.id, r.score]));
-    if (!scores) scores = hit;
-    else for (const id of [...scores.keys()]) {
-      if (hit.has(id)) scores.set(id, scores.get(id) + hit.get(id)); else scores.delete(id);
+    let from = 0, at;
+    while ((at = joined.indexOf(tok, from)) !== -1) {
+      for (let p = at; p < at + tok.length; p++) marked[owner[p]] = true;
+      from = at + tok.length;
     }
   }
-  return [...(scores || new Map()).entries()].sort((a, b) => a[1] - b[1]).map(([id]) => memos[id]);
+  let html = "", open = false;
+  chars.forEach((c, i) => {
+    if (marked[i] && !open) { html += "<mark>"; open = true; }
+    if (!marked[i] && open) { html += "</mark>"; open = false; }
+    html += esc(c);
+  });
+  return open ? html + "</mark>" : html;
 }
 
 // ---------- 表示 ----------
@@ -267,6 +328,150 @@ function liveMemos() {
 function render() {
   renderMemos();
   renderTodos();
+  renderMoney();
+}
+
+// ---------- 家計 ----------
+const moneyView = $("#moneyView");
+const yen = (n) => `${Number(n).toLocaleString("ja-JP")}円`;
+const thisMonth = () => new Date().toLocaleDateString("sv-SE").slice(0, 7); // YYYY-MM
+let moneyMonth = thisMonth();
+let backfilling = false;
+
+function shiftMonth(ym, diff) {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(y, m - 1 + diff, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function allExpenses() {
+  return liveMemos().flatMap((m) => (m.expenses || []).map((e) => ({ ...e, memo: m })));
+}
+
+// まだ金額を読み取っていない過去のメモ
+const unreadMemos = () => liveMemos().filter((m) => m.expenses == null && m.ai_status === "done" && m.text.trim());
+
+function sumBy(rows, key) {
+  const map = new Map();
+  for (const r of rows) map.set(key(r), (map.get(key(r)) || 0) + r.amount);
+  return [...map.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function renderMoney() {
+  const rows = allExpenses().filter((e) => e.date.startsWith(moneyMonth))
+    .sort((a, b) => b.date.localeCompare(a.date));
+  const total = rows.reduce((s, e) => s + e.amount, 0);
+  const prevTotal = allExpenses().filter((e) => e.date.startsWith(shiftMonth(moneyMonth, -1)))
+    .reduce((s, e) => s + e.amount, 0);
+  const [y, mo] = moneyMonth.split("-").map(Number);
+  const unread = unreadMemos().length;
+
+  let html = `
+    <div class="money-nav">
+      <button type="button" class="icon-btn" data-money="prev" aria-label="前の月">‹</button>
+      <h2>${y}年${mo}月</h2>
+      <button type="button" class="icon-btn" data-money="next" aria-label="次の月" ${moneyMonth >= thisMonth() ? "disabled" : ""}>›</button>
+    </div>
+    <div class="money-total">
+      <div class="label">支出の合計</div>
+      <div class="value">${yen(total)}</div>
+      <div class="muted">${rows.length}件${prevTotal ? ` ／ 前月 ${yen(prevTotal)}` : ""}</div>
+    </div>`;
+
+  if (unread) {
+    html += `<div class="money-note">
+      <p>まだ金額を読み取っていない過去のメモが <b>${unread}件</b> あります。</p>
+      <button type="button" class="primary-btn" data-money="backfill" ${backfilling || !session ? "disabled" : ""}>
+        ${backfilling ? "読み取り中…" : "過去のメモから金額を読み取る"}</button>
+      ${session ? "" : `<p class="muted">ログインすると読み取れます。</p>`}
+    </div>`;
+  }
+
+  if (!rows.length) {
+    html += `<p class="empty">この月の支出の記録はありません。<br>「スーパーで牛乳と卵 580円」のように<br>金額入りでメモすると、ここに集まります。</p>`;
+    moneyView.innerHTML = html;
+    return;
+  }
+
+  const max = Math.max(...sumBy(rows, (e) => e.category).map(([, v]) => v));
+  html += `<div class="day-head">分類別</div><div class="card">` +
+    sumBy(rows, (e) => e.category).map(([k, v]) => `
+      <div class="bar-row">
+        <span class="bar-label">${esc(k)}</span>
+        <span class="bar"><span style="width:${Math.max(2, (v / max) * 100)}%"></span></span>
+        <span class="bar-value">${yen(v)}</span>
+      </div>`).join("") + `</div>`;
+
+  html += `<div class="day-head">お店別</div><div class="card">` +
+    sumBy(rows, (e) => e.shop || "（お店不明）").slice(0, 10).map(([k, v]) =>
+      `<div class="kv"><span>${esc(k)}</span><b>${yen(v)}</b></div>`).join("") + `</div>`;
+
+  html += `<div class="day-head">明細</div><div class="card">` +
+    rows.map((e) => `
+      <button type="button" class="money-item" data-act="edit" data-id="${e.memo.id}">
+        <span class="d">${esc(e.date.slice(5).replace("-", "/"))}</span>
+        <span class="t">${esc(e.item)}${e.shop ? `<small>${esc(e.shop)}・${esc(e.category)}</small>` : `<small>${esc(e.category)}</small>`}</span>
+        <b>${yen(e.amount)}</b>
+      </button>`).join("") + `</div>
+    <div class="btn-row end"><button type="button" class="ghost-btn" data-money="csv">この月をCSVで書き出す</button></div>
+    <p class="muted money-hint">金額がちがうときは、明細を押して元のメモを直すと、AIが読み取り直します。</p>`;
+  moneyView.innerHTML = html;
+}
+
+moneyView.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-money]");
+  if (!b) return;
+  if (b.dataset.money === "prev") { moneyMonth = shiftMonth(moneyMonth, -1); renderMoney(); }
+  if (b.dataset.money === "next") { moneyMonth = shiftMonth(moneyMonth, 1); renderMoney(); }
+  if (b.dataset.money === "backfill") backfillExpenses();
+  if (b.dataset.money === "csv") exportMoneyCsv();
+});
+
+// 過去のメモから金額だけを読み取る（回答や要約は変えない）
+async function backfillExpenses() {
+  if (backfilling || !supabase || !session) return;
+  backfilling = true;
+  const targets = unreadMemos();
+  let done = 0, found = 0;
+  renderMoney();
+  try {
+    for (const m of targets) {
+      const textAtStart = m.text;
+      const { data, error } = await supabase.functions.invoke("ai-memo", {
+        body: { action: "expenses", text: m.text, created_at: m.created_at },
+      });
+      if (error) {
+        toast("読み取りを中断しました: " + (await errorMessage(error)), 6000);
+        break;
+      }
+      const cur = memos[m.id];
+      if (cur && cur.text === textAtStart) {
+        cur.expenses = data.expenses || [];
+        found += cur.expenses.length;
+        touch(cur);
+      }
+      done++;
+      const btn = moneyView.querySelector('[data-money="backfill"]');
+      if (btn) btn.textContent = `読み取り中… ${done} / ${targets.length}`;
+    }
+    if (done === targets.length) toast(`${done}件のメモを読み取り、支出を${found}件見つけました`, 5000);
+  } finally {
+    backfilling = false;
+    renderMoney();
+  }
+}
+
+function exportMoneyCsv() {
+  const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const rows = [["日付", "品目", "お店", "分類", "金額"]];
+  for (const e of allExpenses().filter((e) => e.date.startsWith(moneyMonth)).sort((a, b) => a.date.localeCompare(b.date))) {
+    rows.push([e.date, e.item, e.shop, e.category, e.amount]);
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + rows.map((r) => r.map(cell).join(",")).join("\r\n")], { type: "text/csv" }));
+  a.download = `koememo-家計-${moneyMonth}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 function renderMemos() {
@@ -278,9 +483,15 @@ function renderMemos() {
   }
   let html = "";
   if (q) {
-    const hits = search(list, q);
-    html += `<div class="day-head">検索結果 ${hits.length}件</div>`;
-    html += hits.map((m) => cardHTML(m, true)).join("") || `<p class="empty">見つかりませんでした</p>`;
+    const { exact, fuzzy } = search(list, q);
+    const tokens = searchTokens(q);
+    html += `<div class="day-head">「${esc(q)}」を含むメモ ${exact.length}件</div>`;
+    html += exact.map((m) => cardHTML(m, true, tokens)).join("");
+    if (fuzzy.length) {
+      html += `<div class="day-head">似ている候補 ${fuzzy.length}件（表記ゆれ・打ち間違い）</div>`;
+      html += fuzzy.map((m) => cardHTML(m, true, tokens)).join("");
+    }
+    if (!exact.length && !fuzzy.length) html += `<p class="empty">見つかりませんでした</p>`;
   } else {
     const pinned = list.filter((m) => m.pinned);
     if (pinned.length) {
@@ -296,7 +507,8 @@ function renderMemos() {
   memosView.innerHTML = html;
 }
 
-function cardHTML(m, showDate) {
+function cardHTML(m, showDate, tokens = []) {
+  const hl = (s) => highlight(s, tokens);
   const when = showDate ? formatDateTime(m.created_at) : formatTime(m.created_at);
   let ai = "";
   if (m.ai_status === "pending") {
@@ -305,12 +517,14 @@ function cardHTML(m, showDate) {
     ai = `<div class="ai-state">⚠️ AI解析に失敗: ${esc(m.ai_error)} <button class="tag" data-act="retry" data-id="${m.id}">再試行</button></div>`;
   }
   const answer = m.is_question && m.answer
-    ? `<details class="answer" open><summary>🤖 AIの回答</summary>${esc(m.answer)}</details>` : "";
-  const summary = m.summary && m.summary !== m.text ? `<div class="summary">${esc(m.summary)}</div>` : "";
+    ? `<details class="answer" open><summary>🤖 AIの回答</summary>${hl(m.answer)}</details>` : "";
+  const summary = m.summary && m.summary !== m.text ? `<div class="summary">${hl(m.summary)}</div>` : "";
   const tags = m.tags.length
     ? `<div class="tags">${m.tags.map((t) => `<button class="tag" data-act="tag" data-tag="${esc(t)}">#${esc(t)}</button>`).join("")}</div>` : "";
   const todos = m.todos.length
-    ? `<ul class="mini-todos">${m.todos.map((t) => `<li class="${t.done ? "done" : ""}">${esc(t.text)}${t.due ? `（${esc(dueLabel(t))}）` : ""}</li>`).join("")}</ul>` : "";
+    ? `<ul class="mini-todos">${m.todos.map((t) => `<li class="${t.done ? "done" : ""}">${hl(t.text)}${t.due ? `（${esc(dueLabel(t))}）` : ""}</li>`).join("")}</ul>` : "";
+  const money = (m.expenses || []).length
+    ? `<div class="mini-money">💴 ${m.expenses.map((e) => `${hl(e.item)} <b>${yen(e.amount)}</b>`).join("、")}</div>` : "";
   return `
     <article class="card ${m.pinned ? "pinned" : ""}">
       <div class="card-head">
@@ -318,8 +532,8 @@ function cardHTML(m, showDate) {
         <button data-act="pin" data-id="${m.id}" class="${m.pinned ? "on" : ""}" aria-label="ピン留め">📌</button>
         <button data-act="edit" data-id="${m.id}" aria-label="編集">✏️</button>
       </div>
-      <div class="card-text">${esc(m.text)}</div>
-      ${summary}${answer}${todos}${tags}${ai}
+      <div class="card-text">${hl(m.text)}</div>
+      ${summary}${answer}${money}${todos}${tags}${ai}
     </article>`;
 }
 
@@ -542,7 +756,7 @@ $("#editSave").addEventListener("click", () => {
 $("#editDelete").addEventListener("click", () => {
   const m = memos[editingId];
   if (!m || !confirm("このメモを削除しますか？")) return;
-  Object.assign(m, { deleted: true, text: "", answer: "", summary: "", tags: [], keywords: [], todos: [] });
+  Object.assign(m, { deleted: true, text: "", answer: "", summary: "", tags: [], keywords: [], todos: [], expenses: [] });
   touch(m);
   editDialog.close();
   toast("削除しました");
@@ -764,16 +978,26 @@ function switchView(view) {
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.view === view));
   memosView.hidden = view !== "memos";
   todosView.hidden = view !== "todos";
+  moneyView.hidden = view !== "money";
 }
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => switchView(t.dataset.view)));
 
-let searchTimer;
-searchInput.addEventListener("input", () => {
+// 日本語の変換確定・音声入力・検索キーなど、どの入力方法でも検索が動くようにする
+let searchTimer, lastQuery = "";
+function onSearch() {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
+    if (searchInput.value === lastQuery) return;
+    lastQuery = searchInput.value;
     if (currentView !== "memos") switchView("memos");
     renderMemos();
   }, 150);
+}
+for (const ev of ["input", "compositionend", "change", "search", "keyup"]) {
+  searchInput.addEventListener(ev, onSearch);
+}
+searchInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.isComposing) searchInput.blur(); // 検索キーでキーボードを閉じて結果を見やすく
 });
 
 // ---------- 起動 ----------
@@ -789,7 +1013,8 @@ if ("serviceWorker" in navigator) {
 render();
 updateStatus();
 // 通知から開いたときは ToDo タブを表示
-if (new URLSearchParams(location.search).get("view") === "todos") switchView("todos");
+const startView = new URLSearchParams(location.search).get("view");
+if (startView === "todos" || startView === "money") switchView(startView);
 
 if (supabase) {
   const { data } = await supabase.auth.getSession();
