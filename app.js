@@ -617,6 +617,69 @@ function saveCompose() {
   processAI();
 }
 
+// ---------- レシートを撮って記録 ----------
+const receiptBtn = $("#receiptBtn");
+const receiptInput = $("#receiptInput");
+
+receiptBtn.addEventListener("click", () => {
+  if (!supabase || !session) return toast("レシートの読み取りは、ログインすると使えます");
+  if (!navigator.onLine) return toast("インターネットにつながっているときに使えます");
+  receiptInput.value = "";
+  receiptInput.click(); // iPhone では「写真を撮る」「写真ライブラリ」などを選べる
+});
+
+// 写真を JPEG に変換し、AI が読みやすい大きさ（長い辺 1568px まで）に縮める
+async function photoToJpegBase64(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const scale = Math.min(1, 1568 / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+receiptInput.addEventListener("change", async () => {
+  const file = receiptInput.files?.[0];
+  if (!file) return;
+  receiptBtn.disabled = true;
+  receiptBtn.classList.add("busy");
+  toast("レシートを読み取っています…", 15000);
+  try {
+    const image = await photoToJpegBase64(file);
+    const { data, error } = await supabase.functions.invoke("ai-memo", {
+      body: { action: "receipt", image, media_type: "image/jpeg", created_at: new Date().toISOString() },
+    });
+    if (error) return toast("読み取れませんでした: " + (await errorMessage(error)), 7000);
+
+    data.items ||= [];
+    const lines = data.items.map((i) => `・${i.name} ${yen(i.amount)}`);
+    const m = newMemo(`🧾 レシート（${data.shop || "お店不明"}）${data.date}\n合計 ${yen(data.total)}\n${lines.join("\n")}`);
+    Object.assign(m, {
+      ai_status: "done",
+      summary: `${data.shop || "お店"}で${yen(data.total)}の買い物`,
+      tags: ["買い物", "レシート"],
+      keywords: [data.shop, ...data.items.map((i) => i.name)].filter(Boolean),
+      expenses: data.expenses,
+    });
+    touch(m);
+    toast(`記録しました：${data.shop || "お店不明"} ${yen(data.total)}`, 5000);
+  } catch (e) {
+    console.error(e);
+    toast("写真を読み込めませんでした。もう一度お試しください", 6000);
+  } finally {
+    receiptBtn.disabled = false;
+    receiptBtn.classList.remove("busy");
+  }
+});
+
 // ---------- 音声入力 ----------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const micBtn = $("#micBtn");

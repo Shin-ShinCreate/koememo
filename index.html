@@ -39,7 +39,9 @@
   <footer class="composer">
     <div id="interim" class="interim" hidden></div>
     <div class="composer-row">
-      <textarea id="compose" rows="1" placeholder="メモを入力、またはマイクで話す"></textarea>
+      <button id="receiptBtn" class="receipt-btn" aria-label="レシートを撮って記録" title="レシートを撮って記録">🧾</button>
+      <input id="receiptInput" type="file" accept="image/*" hidden>
+      <textarea id="compose" rows="1" placeholder="メモを入力"></textarea>
       <button id="saveBtn" class="save-btn" aria-label="保存">保存</button>
       <button id="micBtn" class="mic-btn" aria-label="音声入力">
         <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
