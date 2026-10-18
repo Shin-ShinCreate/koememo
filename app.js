@@ -617,16 +617,24 @@ function saveCompose() {
   processAI();
 }
 
-// ---------- レシートを撮って記録 ----------
-const receiptBtn = $("#receiptBtn");
-const receiptInput = $("#receiptInput");
+// ---------- 写真から記録（文字の読み取り・レシート） ----------
+const photoBtn = $("#photoBtn");
+const photoInput = $("#photoInput");
+const photoDialog = $("#photoDialog");
+let photoMode = "ocr";
 
-receiptBtn.addEventListener("click", () => {
-  if (!supabase || !session) return toast("レシートの読み取りは、ログインすると使えます");
+photoBtn.addEventListener("click", () => {
+  if (!supabase || !session) return toast("写真からの記録は、ログインすると使えます");
   if (!navigator.onLine) return toast("インターネットにつながっているときに使えます");
-  receiptInput.value = "";
-  receiptInput.click(); // iPhone では「写真を撮る」「写真ライブラリ」などを選べる
+  photoDialog.showModal();
 });
+
+photoDialog.querySelectorAll("[data-photo]").forEach((b) => b.addEventListener("click", () => {
+  photoMode = b.dataset.photo;
+  photoDialog.close();
+  photoInput.value = "";
+  photoInput.click(); // iPhone では「写真を撮る」「写真ライブラリ」などを選べる
+}));
 
 // 写真を JPEG に変換し、AI が読みやすい大きさ（長い辺 1568px まで）に縮める
 async function photoToJpegBase64(file) {
@@ -646,18 +654,28 @@ async function photoToJpegBase64(file) {
   }
 }
 
-receiptInput.addEventListener("change", async () => {
-  const file = receiptInput.files?.[0];
+photoInput.addEventListener("change", async () => {
+  const file = photoInput.files?.[0];
   if (!file) return;
-  receiptBtn.disabled = true;
-  receiptBtn.classList.add("busy");
-  toast("レシートを読み取っています…", 15000);
+  const mode = photoMode;
+  photoBtn.disabled = true;
+  photoBtn.classList.add("busy");
+  toast(mode === "receipt" ? "レシートを読み取っています…" : "写真の文字を読み取っています…", 20000);
   try {
     const image = await photoToJpegBase64(file);
     const { data, error } = await supabase.functions.invoke("ai-memo", {
-      body: { action: "receipt", image, media_type: "image/jpeg", created_at: new Date().toISOString() },
+      body: { action: mode, image, media_type: "image/jpeg", created_at: new Date().toISOString() },
     });
     if (error) return toast("読み取れませんでした: " + (await errorMessage(error)), 7000);
+
+    if (mode === "ocr") {
+      // ふつうのメモとして保存し、要約・タグ・ToDo などは AI がいつもどおり解析する
+      const m = newMemo(`📷 ${data.text}`);
+      touch(m);
+      toast("写真の文字をメモにしました（AIが解析中）", 5000);
+      processAI();
+      return;
+    }
 
     data.items ||= [];
     const lines = data.items.map((i) => `・${i.name} ${yen(i.amount)}`);
@@ -675,8 +693,8 @@ receiptInput.addEventListener("change", async () => {
     console.error(e);
     toast("写真を読み込めませんでした。もう一度お試しください", 6000);
   } finally {
-    receiptBtn.disabled = false;
-    receiptBtn.classList.remove("busy");
+    photoBtn.disabled = false;
+    photoBtn.classList.remove("busy");
   }
 });
 
@@ -914,9 +932,20 @@ async function renderPushBox() {
   if (sub && Notification.permission === "granted") {
     box.innerHTML = `<span class="muted">この端末: オン</span>
       <button type="button" id="testPush">テスト通知</button>
-      <button type="button" id="disablePush">オフにする</button>`;
+      <button type="button" id="disablePush">オフにする</button>
+      <label class="check full"><input type="checkbox" id="morningPush" disabled> 毎朝7時に、今日のToDoと期限切れを知らせる</label>`;
     $("#testPush").onclick = testPush;
     $("#disablePush").onclick = disablePush;
+    // 毎朝のお知らせ（端末ごと）
+    const cb = $("#morningPush");
+    const { data } = await supabase.from("push_subscriptions").select("morning").eq("endpoint", sub.endpoint).maybeSingle();
+    cb.checked = data ? data.morning !== false : true;
+    cb.disabled = false;
+    cb.onchange = async () => {
+      const { error } = await supabase.from("push_subscriptions").update({ morning: cb.checked }).eq("endpoint", sub.endpoint);
+      if (error) { cb.checked = !cb.checked; return toast("変更できませんでした: " + error.message, 6000); }
+      toast(cb.checked ? "毎朝のお知らせをオンにしました" : "毎朝のお知らせをオフにしました");
+    };
   } else {
     box.innerHTML = `<button type="button" id="enablePush" class="primary">この端末で通知をオンにする</button>`;
     $("#enablePush").onclick = enablePush;

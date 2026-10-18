@@ -174,6 +174,13 @@ main > section { max-width: 760px; margin: 0 auto; }
 .receipt-btn:disabled { opacity: .5; }
 .receipt-btn.busy { animation: pulse-soft 1s infinite; }
 @keyframes pulse-soft { 50% { opacity: .4; } }
+.choice {
+  display: flex; gap: 12px; align-items: center; width: 100%; text-align: left;
+  border: 1px solid var(--line); background: var(--bg); border-radius: 12px; padding: 12px 14px;
+}
+.choice b { display: block; }
+.choice small { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+.choice-icon { font-size: 26px; }
 .save-btn {
   border: 0; border-radius: 12px; padding: 10px 14px; background: var(--accent-soft); color: var(--accent); font-weight: 700;
 }
@@ -210,6 +217,7 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 .muted { color: var(--muted); font-size: 13px; margin: 0; }
 .check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
 #editText { font-size: calc(16px * var(--memo-scale, 1)); }
+.check.full { flex-basis: 100%; margin-top: 4px; }
 
 /* 文字の大きさの切り替え */
 .size-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

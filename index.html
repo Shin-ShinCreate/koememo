@@ -39,8 +39,8 @@
   <footer class="composer">
     <div id="interim" class="interim" hidden></div>
     <div class="composer-row">
-      <button id="receiptBtn" class="receipt-btn" aria-label="レシートを撮って記録" title="レシートを撮って記録">🧾</button>
-      <input id="receiptInput" type="file" accept="image/*" hidden>
+      <button id="photoBtn" class="receipt-btn" aria-label="写真から記録" title="写真から記録">📷</button>
+      <input id="photoInput" type="file" accept="image/*" hidden>
       <textarea id="compose" rows="1" placeholder="メモを入力"></textarea>
       <button id="saveBtn" class="save-btn" aria-label="保存">保存</button>
       <button id="micBtn" class="mic-btn" aria-label="音声入力">
@@ -87,6 +87,23 @@
         <button value="cancel">キャンセル</button>
         <button type="button" id="editSave" class="primary">保存</button>
       </div>
+    </form>
+  </dialog>
+
+  <!-- 写真から記録 -->
+  <dialog id="photoDialog">
+    <form method="dialog" class="sheet">
+      <h2>写真から記録</h2>
+      <button type="button" class="choice" data-photo="ocr">
+        <span class="choice-icon">📝</span>
+        <span><b>写真の文字をメモにする</b><small>手書きメモ・ホワイトボード・書類・張り紙など</small></span>
+      </button>
+      <button type="button" class="choice" data-photo="receipt">
+        <span class="choice-icon">🧾</span>
+        <span><b>レシートを記録</b><small>お店・品目・金額を読み取り、家計に入れる</small></span>
+      </button>
+      <p class="muted">写真そのものは保存しません。読み取った文字だけを残します。</p>
+      <div class="btn-row end"><button value="cancel">キャンセル</button></div>
     </form>
   </dialog>
 
