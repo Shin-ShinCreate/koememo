@@ -59,6 +59,9 @@ function newMemo(text) {
     todos: [],
     expenses: null, // null = まだ金額を読み取っていない
     thread: [], // AI との続きの会話 [{ q, a, at }]
+    photos: [], // 写真の保存場所（Supabase Storage の photos の中のパス）
+    deleted_at: null, // ゴミ箱に入れた日時（deleted が true のとき）
+    purged: false, // 完全に削除した
   };
 }
 
@@ -73,7 +76,8 @@ function touch(m) {
 }
 
 const COLUMNS = ["id", "text", "created_at", "updated_at", "pinned", "deleted", "ai_status", "ai_error",
-  "is_question", "answer", "summary", "tags", "keywords", "todos", "expenses", "thread"];
+  "is_question", "answer", "summary", "tags", "keywords", "todos", "expenses", "thread",
+  "photos", "deleted_at", "purged"];
 
 function toRow(m) {
   const row = {};
@@ -89,6 +93,9 @@ function fromRow(r) {
   m.text ||= ""; m.answer ||= ""; m.summary ||= "";
   m.expenses ??= null;
   m.thread ||= [];
+  m.photos ||= [];
+  m.deleted_at ??= null;
+  m.purged = !!m.purged;
   return m;
 }
 
@@ -176,7 +183,7 @@ async function processAI() {
     for (const m of targets) {
       const textAtStart = m.text;
       const { data, error } = await supabase.functions.invoke("ai-memo", {
-        body: { text: m.text, created_at: m.created_at },
+        body: { text: m.text, created_at: m.created_at, photo_path: (m.photos || [])[0] || "" },
       });
       const cur = memos[m.id];
       if (!cur || cur.text !== textAtStart) continue; // 解析中に編集された
@@ -489,7 +496,8 @@ function renderMemos() {
   if (q) {
     const { exact, fuzzy } = search(list, q);
     const tokens = searchTokens(q);
-    html += `<div class="day-head">「${esc(q)}」を含むメモ ${exact.length}件</div>`;
+    html += `<div class="day-head search-head">「${esc(q)}」を含むメモ ${exact.length}件
+      ${exact.length >= 2 ? `<button type="button" class="mini-btn" data-digest="1">✨ AIでまとめる</button>` : ""}</div>`;
     html += exact.map((m) => cardHTML(m, true, tokens)).join("");
     if (fuzzy.length) {
       html += `<div class="day-head">似ている候補 ${fuzzy.length}件（表記ゆれ・打ち間違い）</div>`;
@@ -509,6 +517,7 @@ function renderMemos() {
     }
   }
   memosView.innerHTML = html;
+  hydratePhotos(memosView);
 }
 
 function cardHTML(m, showDate, tokens = []) {
@@ -539,10 +548,13 @@ function cardHTML(m, showDate, tokens = []) {
     <article class="card ${m.pinned ? "pinned" : ""}">
       <div class="card-head">
         <span class="time">${esc(when)}${m._dirty && session ? " ・未同期" : ""}</span>
+        <button data-act="share" data-id="${m.id}" aria-label="共有">📤</button>
         <button data-act="chat" data-id="${m.id}" aria-label="AIに質問">💬</button>
         <button data-act="pin" data-id="${m.id}" class="${m.pinned ? "on" : ""}" aria-label="ピン留め">📌</button>
         <button data-act="edit" data-id="${m.id}" aria-label="編集">✏️</button>
       </div>
+      ${(m.photos || []).length ? `<div class="thumbs">${m.photos.map((p) =>
+        `<button type="button" class="thumb" data-act="photo" data-path="${esc(p)}" aria-label="写真を大きく表示"><img data-photo="${esc(p)}" alt="写真"></button>`).join("")}</div>` : ""}
       <div class="card-text">${hl(m.text)}</div>
       ${summary}${answer}${money}${todos}${tags}${ai}
     </article>`;
@@ -596,11 +608,20 @@ function updateStatus() {
   else if (!navigator.onLine) setStatus("オフライン", "warn");
 }
 let toastTimer;
-function toast(msg, ms = 3000) {
+// action を渡すと、メッセージの横にボタン（「元に戻す」など）を出す
+function toast(msg, ms = 3000, action = null) {
   const el = $("#toast");
   // メニューなどのダイアログが開いていると裏に隠れるので、ダイアログの中に移して表示する
   (document.querySelector("dialog[open]") || document.body).appendChild(el);
   el.textContent = msg;
+  if (action) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "toast-action";
+    b.textContent = action.label;
+    b.onclick = () => { el.hidden = true; action.run(); };
+    el.append(" ", b);
+  }
   el.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (el.hidden = true), ms);
@@ -650,28 +671,109 @@ photoDialog.querySelectorAll("[data-photo]").forEach((b) => b.addEventListener("
   photoInput.click(); // iPhone では「写真を撮る」「写真ライブラリ」などを選べる
 }));
 
-// 写真を JPEG に変換し、AI が読みやすい大きさ（長い辺 1568px まで）に縮める
-async function photoToJpegBase64(file) {
+// 写真を JPEG に変換し、長い辺を maxSide までに縮めた canvas を返す
+async function photoToCanvas(file, maxSide) {
   const url = URL.createObjectURL(file);
   try {
     const img = new Image();
     img.src = url;
     await img.decode();
-    const scale = Math.min(1, 1568 / Math.max(img.naturalWidth, img.naturalHeight));
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(img.naturalWidth * scale);
     canvas.height = Math.round(img.naturalHeight * scale);
     canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+    return canvas;
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+// AI が読みやすい大きさ（長い辺 1568px まで）の JPEG（base64）
+async function photoToJpegBase64(file) {
+  return (await photoToCanvas(file, 1568)).toDataURL("image/jpeg", 0.85).split(",")[1];
+}
+
+// ---------- 写真つきメモ ----------
+// 写真は長い辺 1280px の JPEG（1枚およそ 200KB）にして、Supabase Storage の「ユーザーID/メモID/」に保存する
+const photoMemoDialog = $("#photoMemoDialog");
+const photoMemoText = $("#photoMemoText");
+let photoMemoBlob = null;
+
+async function openPhotoMemo(file) {
+  try {
+    const canvas = await photoToCanvas(file, 1280);
+    photoMemoBlob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.82));
+    $("#photoMemoPreview").src = canvas.toDataURL("image/jpeg", 0.6);
+    photoMemoText.value = "";
+    photoMemoDialog.showModal();
+  } catch (e) {
+    console.error(e);
+    toast("写真を読み込めませんでした。もう一度お試しください", 6000);
+  }
+}
+
+async function savePhotoMemo() {
+  if (!photoMemoBlob || !session) return;
+  const btn = $("#photoMemoSave");
+  btn.disabled = true;
+  btn.textContent = "保存中…";
+  try {
+    const m = newMemo(photoMemoText.value.trim() || "📷 写真");
+    const path = `${session.user.id}/${m.id}/${crypto.randomUUID()}.jpg`;
+    const { error } = await supabase.storage.from("photos").upload(path, photoMemoBlob, { contentType: "image/jpeg" });
+    if (error) return toast("写真を保存できませんでした: " + error.message, 7000);
+    m.photos = [path];
+    touch(m);
+    photoMemoDialog.close();
+    toast("写真つきメモを保存しました（AIが解析中）", 5000);
+    processAI();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存";
+  }
+}
+
+$("#photoMemoSave").addEventListener("click", savePhotoMemo);
+$("#photoMemoMic").addEventListener("click", () => toggleRec({
+  textarea: photoMemoText, button: $("#photoMemoMic"),
+}));
+photoMemoDialog.addEventListener("close", () => { if (recording) stopRec(); });
+
+// 写真の表示：保存場所は非公開なので、1時間だけ使える表示用アドレスをもらって表示する
+const photoUrlCache = new Map(); // path → { url, exp }
+
+async function hydratePhotos(root = document) {
+  if (!supabase || !session) return;
+  const imgs = [...root.querySelectorAll("img[data-photo]")];
+  if (!imgs.length) return;
+  const now = Date.now();
+  const need = [...new Set(imgs.map((i) => i.dataset.photo))]
+    .filter((p) => !(photoUrlCache.get(p)?.exp > now));
+  if (need.length) {
+    const { data } = await supabase.storage.from("photos").createSignedUrls(need, 3600);
+    for (const d of data || []) {
+      if (d.signedUrl) photoUrlCache.set(d.path, { url: d.signedUrl, exp: now + 3300_000 });
+    }
+  }
+  for (const img of imgs) {
+    const c = photoUrlCache.get(img.dataset.photo);
+    if (c && img.src !== c.url) img.src = c.url;
+  }
+}
+
+function openPhotoViewer(path) {
+  const c = photoUrlCache.get(path);
+  if (!c) return;
+  $("#photoViewerImg").src = c.url;
+  $("#photoViewer").showModal();
 }
 
 photoInput.addEventListener("change", async () => {
   const file = photoInput.files?.[0];
   if (!file) return;
   const mode = photoMode;
+  if (mode === "memo") return openPhotoMemo(file);
   photoBtn.disabled = true;
   photoBtn.classList.add("busy");
   toast(mode === "receipt" ? "レシートを読み取っています…" : "写真の文字を読み取っています…", 20000);
@@ -918,6 +1020,12 @@ document.addEventListener("click", (e) => {
     case "cal":
       addToCalendar(m, m.todos[Number(btn.dataset.index)]);
       break;
+    case "share":
+      openShare(m);
+      break;
+    case "photo":
+      openPhotoViewer(btn.dataset.path);
+      break;
   }
 });
 
@@ -1052,11 +1160,198 @@ $("#editSave").addEventListener("click", () => {
 });
 $("#editDelete").addEventListener("click", () => {
   const m = memos[editingId];
-  if (!m || !confirm("このメモを削除しますか？")) return;
-  Object.assign(m, { deleted: true, text: "", answer: "", summary: "", tags: [], keywords: [], todos: [], expenses: [], thread: [] });
-  touch(m);
+  if (!m) return;
+  moveToTrash(m);
   editDialog.close();
-  toast("削除しました");
+});
+
+// ---------- 共有 ----------
+let shareMemoId = null;
+
+function openShare(m) {
+  shareMemoId = m.id;
+  $("#shareDialog").showModal();
+}
+
+function shareText(m, full) {
+  let s = `📝 ${formatDateTime(m.created_at)}\n${m.text}`;
+  if (!full) return s;
+  if (m.answer) s += `\n\n🤖 AIの回答\n${m.answer}`;
+  for (const t of m.thread || []) s += `\n\n❓ ${t.q}\n🤖 ${t.a}`;
+  if ((m.todos || []).length) s += "\n\n" + m.todos.map((t) => `${t.done ? "☑" : "☐"} ${t.text}${t.due ? `（${dueLabel(t)}）` : ""}`).join("\n");
+  if ((m.expenses || []).length) s += "\n\n💴 " + m.expenses.map((e) => `${e.item} ${yen(e.amount)}`).join("、");
+  return s;
+}
+
+document.querySelectorAll("#shareDialog [data-share]").forEach((b) => b.addEventListener("click", async () => {
+  const m = memos[shareMemoId];
+  $("#shareDialog").close();
+  if (!m) return;
+  const text = shareText(m, b.dataset.share === "full");
+  if (navigator.share) {
+    try { await navigator.share({ text }); } catch (e) { if (e.name !== "AbortError") toast("共有できませんでした"); }
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("コピーしました。送りたいアプリに貼り付けてください", 5000);
+  } catch {
+    toast("この端末では共有できませんでした");
+  }
+}));
+
+// ---------- テーマ別まとめ ----------
+function digestRange(kind) {
+  const now = new Date();
+  const ym = (d) => d.toLocaleDateString("sv-SE").slice(0, 7);
+  if (kind === "month") return { label: `${now.getMonth() + 1}月`, ok: (m) => m.created_at && new Date(m.created_at).toLocaleDateString("sv-SE").startsWith(ym(now)) };
+  if (kind === "last") {
+    const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    return { label: `${d.getMonth() + 1}月`, ok: (m) => new Date(m.created_at).toLocaleDateString("sv-SE").startsWith(ym(d)) };
+  }
+  if (kind === "3m") {
+    const from = new Date(now.getFullYear(), now.getMonth() - 2, 1).getTime();
+    return { label: "過去3か月", ok: (m) => Date.parse(m.created_at) >= from };
+  }
+  return { label: "すべて", ok: () => true };
+}
+
+function digestTargets() {
+  const q = searchInput.value.trim();
+  const { exact } = search(liveMemos(), q);
+  const range = digestRange($("#digestPeriod").value);
+  // まとめのメモ自身は除く
+  return { q, range, list: exact.filter((m) => range.ok(m) && !(m.tags || []).includes("まとめ")).slice(0, 80) };
+}
+
+function updateDigestCount() {
+  const { list } = digestTargets();
+  $("#digestCount").textContent = `${list.length}件のメモをまとめます${list.length >= 80 ? "（多いので新しい80件まで）" : ""}`;
+  $("#digestRun").disabled = list.length < 1;
+}
+
+memosView.addEventListener("click", (e) => {
+  if (!e.target.closest("[data-digest]")) return;
+  if (!supabase || !session) return toast("AIでまとめるのは、ログインすると使えます");
+  $("#digestInfo").textContent = `テーマ：「${searchInput.value.trim()}」`;
+  updateDigestCount();
+  $("#digestDialog").showModal();
+});
+$("#digestPeriod").addEventListener("change", updateDigestCount);
+
+$("#digestRun").addEventListener("click", async () => {
+  const { q, range, list } = digestTargets();
+  if (!list.length) return;
+  const btn = $("#digestRun");
+  btn.disabled = true;
+  btn.textContent = "まとめています…";
+  try {
+    const memosText = [...list].sort((a, b) => a.created_at.localeCompare(b.created_at)).map((m) => {
+      const d = new Date(m.created_at);
+      const extra = [m.answer && `AIの回答: ${m.answer.slice(0, 300)}`,
+        (m.todos || []).length && `ToDo: ${m.todos.map((t) => `${t.text}${t.done ? "[完了]" : ""}`).join("、")}`].filter(Boolean).join(" / ");
+      return `[${d.getMonth() + 1}/${d.getDate()}] ${m.text.slice(0, 800)}${extra ? `\n  （${extra}）` : ""}`;
+    }).join("\n");
+    const { data, error } = await supabase.functions.invoke("ai-memo", {
+      body: { action: "digest", theme: q, period: range.label, memos_text: memosText, created_at: new Date().toISOString() },
+    });
+    if (error) return toast("まとめられませんでした: " + (await errorMessage(error)), 7000);
+    const m = newMemo(`✨「${q}」のまとめ（${range.label}・${list.length}件）\n\n${data.text}`);
+    Object.assign(m, { ai_status: "done", tags: ["まとめ", q].slice(0, 2), summary: `「${q}」のメモ${list.length}件のまとめ`, keywords: [q, "まとめ"], expenses: [] });
+    touch(m);
+    $("#digestDialog").close();
+    searchInput.value = "";
+    lastQuery = "";
+    switchView("memos");
+    renderMemos();
+    $("#main").scrollTop = 0;
+    toast("まとめを新しいメモにしました", 5000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "まとめる";
+  }
+});
+
+// ---------- ゴミ箱（30日たつとサーバーが自動で完全に削除） ----------
+const TRASH_DAYS = 30;
+const trashedMemos = () => Object.values(memos)
+  .filter((m) => m.deleted && !m.purged && m.text) // 古い版で削除したメモは中身がないので出さない
+  .sort((a, b) => (b.deleted_at || "").localeCompare(a.deleted_at || ""));
+
+function moveToTrash(m) {
+  m.deleted = true;
+  m.deleted_at = new Date().toISOString();
+  touch(m);
+  toast("ゴミ箱に移しました", 6000, { label: "元に戻す", run: () => restoreMemo(m.id) });
+}
+
+function restoreMemo(id) {
+  const m = memos[id];
+  if (!m) return;
+  m.deleted = false;
+  m.deleted_at = null;
+  touch(m);
+  if ($("#trashDialog").open) renderTrash();
+  toast("元に戻しました");
+}
+
+async function purgeMemo(m) {
+  if ((m.photos || []).length && supabase && session) {
+    await supabase.storage.from("photos").remove(m.photos);
+  }
+  Object.assign(m, {
+    purged: true, text: "", answer: "", summary: "", tags: [], keywords: [], todos: [],
+    expenses: [], thread: [], photos: [],
+  });
+  touch(m);
+}
+
+function renderTrash() {
+  const list = trashedMemos();
+  const box = $("#trashList");
+  if (!list.length) {
+    box.innerHTML = `<p class="empty">ゴミ箱は空です。</p>`;
+    $("#emptyTrash").hidden = true;
+    return;
+  }
+  $("#emptyTrash").hidden = false;
+  box.innerHTML = list.map((m) => {
+    const left = Math.max(0, TRASH_DAYS - Math.floor((Date.now() - Date.parse(m.deleted_at || m.updated_at)) / 86400_000));
+    return `<div class="trash-item">
+      <div class="trash-text">${esc(m.text.slice(0, 80))}${m.text.length > 80 ? "…" : ""}</div>
+      <div class="muted">${esc(formatDateTime(m.created_at))} ／ あと${left}日で完全に削除${(m.photos || []).length ? " ／ 📷写真あり" : ""}</div>
+      <div class="btn-row">
+        <button type="button" data-trash="restore" data-id="${m.id}">元に戻す</button>
+        <button type="button" class="danger" data-trash="purge" data-id="${m.id}">完全に削除</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function openTrash() {
+  renderTrash();
+  $("#trashDialog").showModal();
+}
+
+$("#trashList").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-trash]");
+  if (!b) return;
+  const m = memos[b.dataset.id];
+  if (!m) return;
+  if (b.dataset.trash === "restore") restoreMemo(m.id);
+  if (b.dataset.trash === "purge") {
+    if (!confirm("このメモを完全に削除しますか？（元に戻せません）")) return;
+    await purgeMemo(m);
+    renderTrash();
+    toast("完全に削除しました");
+  }
+});
+$("#emptyTrash").addEventListener("click", async () => {
+  const list = trashedMemos();
+  if (!list.length || !confirm(`ゴミ箱の${list.length}件をすべて完全に削除しますか？（元に戻せません）`)) return;
+  for (const m of list) await purgeMemo(m);
+  renderTrash();
+  toast("ゴミ箱を空にしました");
 });
 
 // ---------- メニュー（アカウント・エクスポート） ----------
@@ -1064,8 +1359,11 @@ const menuDialog = $("#menuDialog");
 $("#menuBtn").addEventListener("click", () => {
   renderAccount();
   $("#autoSaveVoice").checked = autoSaveEnabled();
+  const n = trashedMemos().length;
+  $("#trashCount").textContent = n ? `${n}件` : "空です";
   menuDialog.showModal();
 });
+$("#openTrash").addEventListener("click", () => { menuDialog.close(); openTrash(); });
 $("#autoSaveVoice").addEventListener("change", (e) => {
   localStorage.setItem(LS_AUTOSAVE, e.target.checked ? "1" : "0");
 });
@@ -1253,7 +1551,7 @@ function exportAs(kind) {
   let body, type, ext;
   if (kind === "md") {
     body = `# こえメモ（${stamp} 書き出し）\n\n` + list.map((m) => {
-      let s = `## ${formatDateTime(m.created_at)}${m.pinned ? " 📌" : ""}\n\n${m.text}\n`;
+      let s = `## ${formatDateTime(m.created_at)}${m.pinned ? " 📌" : ""}${(m.photos || []).length ? " 📷（写真あり）" : ""}\n\n${m.text}\n`;
       if (m.is_question && m.answer) s += `\n> **AIの回答**\n>\n${m.answer.split("\n").map((l) => "> " + l).join("\n")}\n`;
       for (const t of m.thread || []) {
         s += `\n**質問**：${t.q}\n\n> ${t.a.split("\n").join("\n> ")}\n`;

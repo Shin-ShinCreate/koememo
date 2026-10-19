@@ -60,6 +60,8 @@
         <button type="button" data-export="csv">CSV</button>
         <button type="button" data-export="json">JSON</button>
       </div>
+      <h3>ゴミ箱</h3>
+      <div class="btn-row"><button type="button" id="openTrash">🗑 ゴミ箱を開く</button><span id="trashCount" class="muted"></span></div>
       <h3>表示</h3>
       <div class="size-row" role="group" aria-label="メモの文字の大きさ">
         <span class="size-label">文字の大きさ</span>
@@ -108,6 +110,84 @@
     </div>
   </dialog>
 
+  <!-- ゴミ箱 -->
+  <dialog id="trashDialog">
+    <form method="dialog" class="sheet">
+      <h2>🗑 ゴミ箱</h2>
+      <p class="muted">削除したメモは30日間ここに残り、元に戻せます。30日たつと自動で完全に削除されます。</p>
+      <div id="trashList" class="trash-list"></div>
+      <div class="btn-row">
+        <button type="button" id="emptyTrash" class="danger">ゴミ箱を空にする</button>
+        <span class="spacer"></span>
+        <button value="close">閉じる</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 写真つきメモ -->
+  <dialog id="photoMemoDialog">
+    <form method="dialog" class="sheet">
+      <h2>📷 写真つきメモ</h2>
+      <img id="photoMemoPreview" class="photo-preview" alt="選んだ写真">
+      <div class="chat-input">
+        <textarea id="photoMemoText" rows="2" placeholder="ひとこと（例：駐車場はB2-15）"></textarea>
+        <button type="button" id="photoMemoMic" class="mic-btn small" aria-label="音声入力">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+        </button>
+      </div>
+      <div class="btn-row end">
+        <button value="cancel">キャンセル</button>
+        <button type="button" id="photoMemoSave" class="primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 写真を大きく表示 -->
+  <dialog id="photoViewer" class="photo-viewer">
+    <form method="dialog">
+      <img id="photoViewerImg" alt="写真">
+      <button value="close" class="viewer-close" aria-label="閉じる">✕</button>
+    </form>
+  </dialog>
+
+  <!-- 共有 -->
+  <dialog id="shareDialog">
+    <form method="dialog" class="sheet">
+      <h2>📤 メモを共有</h2>
+      <button type="button" class="choice" data-share="full">
+        <span class="choice-icon">📋</span>
+        <span><b>AIの回答・ToDoも含める</b><small>日時・本文・AIの回答・続きの会話・ToDo・金額</small></span>
+      </button>
+      <button type="button" class="choice" data-share="text">
+        <span class="choice-icon">📝</span>
+        <span><b>本文だけ</b><small>メモの本文だけを送ります</small></span>
+      </button>
+      <p class="muted">LINE・メール・AirDrop・「メモ」アプリなどに送れます（文字だけ。写真は送りません）。</p>
+      <div class="btn-row end"><button value="cancel">キャンセル</button></div>
+    </form>
+  </dialog>
+
+  <!-- テーマ別まとめ -->
+  <dialog id="digestDialog">
+    <form method="dialog" class="sheet">
+      <h2>✨ AIでまとめる</h2>
+      <p id="digestInfo" class="muted"></p>
+      <label class="size-row">期間
+        <select id="digestPeriod">
+          <option value="all">すべて</option>
+          <option value="month">今月</option>
+          <option value="last">先月</option>
+          <option value="3m">過去3か月</option>
+        </select>
+      </label>
+      <p id="digestCount" class="muted"></p>
+      <div class="btn-row end">
+        <button value="cancel">キャンセル</button>
+        <button type="button" id="digestRun" class="primary">まとめる</button>
+      </div>
+    </form>
+  </dialog>
+
   <!-- カレンダーに追加 -->
   <dialog id="calDialog">
     <form method="dialog" class="sheet">
@@ -133,11 +213,15 @@
         <span class="choice-icon">📝</span>
         <span><b>写真の文字をメモにする</b><small>手書きメモ・ホワイトボード・書類・張り紙など</small></span>
       </button>
+      <button type="button" class="choice" data-photo="memo">
+        <span class="choice-icon">🖼️</span>
+        <span><b>写真つきメモ</b><small>写真をそのまま残して、ひとこと添える（駐車場・商品・図など）</small></span>
+      </button>
       <button type="button" class="choice" data-photo="receipt">
         <span class="choice-icon">🧾</span>
         <span><b>レシートを記録</b><small>お店・品目・金額を読み取り、家計に入れる</small></span>
       </button>
-      <p class="muted">写真そのものは保存しません。読み取った文字だけを残します。</p>
+      <p class="muted">「写真の文字」「レシート」は写真を保存せず、読み取った文字だけを残します。</p>
       <div class="btn-row end"><button value="cancel">キャンセル</button></div>
     </form>
   </dialog>
