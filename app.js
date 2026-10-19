@@ -838,15 +838,53 @@ function speak(text, btn) {
 }
 
 // ---------- カレンダーに追加 ----------
-// サーバーが予定のファイル（.ics）を返す。iPhone では「カレンダーに追加」の画面が開く
+let calTarget = null;
+
 function addToCalendar(m, todo) {
+  calTarget = { m, todo };
+  $("#calTitle").textContent = `${todo.text}（${dueLabel(todo)}）`;
+  $("#calDialog").showModal();
+}
+
+// iPhone のカレンダー：サーバーが返す予定のファイル（.ics）を開く
+function openIcs({ m, todo }) {
   if (!supabase) return toast("カレンダー登録は、Supabase の設定後に使えます");
   const q = new URLSearchParams({
     ics: "1", title: todo.text, due: todo.due, time: todo.time || "",
     note: m.text.slice(0, 300),
   });
-  window.open(`${SUPABASE_URL}/functions/v1/ai-memo?${q}`, "_blank");
+  const url = `${SUPABASE_URL}/functions/v1/ai-memo?${q}`;
+  if (isIOS && isStandalone) {
+    // ホーム画面のアプリの中では予定のファイルを開けない（真っ白になる）ので、Safari で直接開く
+    location.href = "x-safari-" + url;
+  } else {
+    window.open(url, "_blank");
+  }
 }
+
+// Google カレンダー：予定の入力画面を、内容を入れた状態で開く
+function openGoogleCalendar({ m, todo }) {
+  const ymd = (s) => s.replace(/-/g, "");
+  let dates;
+  if (todo.time) {
+    const start = new Date(`${todo.due}T${todo.time}:00+09:00`);
+    const end = new Date(start.getTime() + 3600_000);
+    const utc = (d) => d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    dates = `${utc(start)}/${utc(end)}`;
+  } else {
+    const next = new Date(Date.parse(`${todo.due}T00:00:00Z`) + 86400_000).toISOString().slice(0, 10);
+    dates = `${ymd(todo.due)}/${ymd(next)}`;
+  }
+  const q = new URLSearchParams({ action: "TEMPLATE", text: todo.text, dates, details: m.text.slice(0, 500) });
+  window.open(`https://calendar.google.com/calendar/render?${q}`, "_blank");
+}
+
+document.querySelectorAll("#calDialog [data-cal]").forEach((b) => b.addEventListener("click", () => {
+  $("#calDialog").close();
+  if (!calTarget) return;
+  if (b.dataset.cal === "google") openGoogleCalendar(calTarget);
+  else openIcs(calTarget);
+}));
 
 // ---------- カード操作 ----------
 document.addEventListener("click", (e) => {

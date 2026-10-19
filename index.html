@@ -108,6 +108,23 @@
     </div>
   </dialog>
 
+  <!-- カレンダーに追加 -->
+  <dialog id="calDialog">
+    <form method="dialog" class="sheet">
+      <h2>📅 カレンダーに追加</h2>
+      <p id="calTitle" class="muted"></p>
+      <button type="button" class="choice" data-cal="google">
+        <span class="choice-icon">🗓️</span>
+        <span><b>Googleカレンダーに追加</b><small>内容が入った予定の画面が開きます。「保存」を押すだけ</small></span>
+      </button>
+      <button type="button" class="choice" data-cal="ics">
+        <span class="choice-icon">📆</span>
+        <span><b>iPhoneのカレンダーに追加</b><small>Safariが開き「カレンダーの予定を追加」の画面になります（パソコンではOutlookなど）</small></span>
+      </button>
+      <div class="btn-row end"><button value="cancel">キャンセル</button></div>
+    </form>
+  </dialog>
+
   <!-- 写真から記録 -->
   <dialog id="photoDialog">
     <form method="dialog" class="sheet">
