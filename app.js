@@ -58,6 +58,7 @@ function newMemo(text) {
     keywords: [],
     todos: [],
     expenses: null, // null = まだ金額を読み取っていない
+    thread: [], // AI との続きの会話 [{ q, a, at }]
   };
 }
 
@@ -72,7 +73,7 @@ function touch(m) {
 }
 
 const COLUMNS = ["id", "text", "created_at", "updated_at", "pinned", "deleted", "ai_status", "ai_error",
-  "is_question", "answer", "summary", "tags", "keywords", "todos", "expenses"];
+  "is_question", "answer", "summary", "tags", "keywords", "todos", "expenses", "thread"];
 
 function toRow(m) {
   const row = {};
@@ -87,6 +88,7 @@ function fromRow(r) {
   m.tags ||= []; m.keywords ||= []; m.todos ||= [];
   m.text ||= ""; m.answer ||= ""; m.summary ||= "";
   m.expenses ??= null;
+  m.thread ||= [];
   return m;
 }
 
@@ -237,7 +239,8 @@ function search(list, query) {
       s: norm(m.summary),
       g: norm([...m.tags, ...m.keywords].join(" ")),
       a: norm(m.answer + " " + m.todos.map((t) => t.text).join(" ") + " " +
-        (m.expenses || []).map((e) => `${e.item} ${e.shop}`).join(" ")),
+        (m.expenses || []).map((e) => `${e.item} ${e.shop}`).join(" ") + " " +
+        (m.thread || []).map((t) => `${t.q} ${t.a}`).join(" ")),
       d: norm(formatDateTime(m.created_at) + " " + m.created_at.slice(0, 10)),
     };
     d.all = [d.t, d.s, d.g, d.a, d.d].join("\n");
@@ -329,6 +332,7 @@ function render() {
   renderMemos();
   renderTodos();
   renderMoney();
+  if (document.querySelector("#chatDialog")?.open) renderChat(); // ほかの端末で会話が進んだとき
 }
 
 // ---------- 家計 ----------
@@ -516,8 +520,14 @@ function cardHTML(m, showDate, tokens = []) {
   } else if (m.ai_status === "error") {
     ai = `<div class="ai-state">⚠️ AI解析に失敗: ${esc(m.ai_error)} <button class="tag" data-act="retry" data-id="${m.id}">再試行</button></div>`;
   }
+  const turns = (m.thread || []).length;
   const answer = m.is_question && m.answer
-    ? `<details class="answer" open><summary>🤖 AIの回答</summary>${hl(m.answer)}</details>` : "";
+    ? `<details class="answer" open><summary>🤖 AIの回答</summary>${hl(m.answer)}
+        <div class="answer-actions">
+          <button type="button" class="mini-btn" data-act="speak" data-id="${m.id}">🔊 読み上げ</button>
+          <button type="button" class="mini-btn" data-act="chat" data-id="${m.id}">💬 続けて質問${turns ? `（${turns}件）` : ""}</button>
+        </div></details>`
+    : turns ? `<button type="button" class="mini-btn chat-link" data-act="chat" data-id="${m.id}">💬 AIとの会話（${turns}件）</button>` : "";
   const summary = m.summary && m.summary !== m.text ? `<div class="summary">${hl(m.summary)}</div>` : "";
   const tags = m.tags.length
     ? `<div class="tags">${m.tags.map((t) => `<button class="tag" data-act="tag" data-tag="${esc(t)}">#${esc(t)}</button>`).join("")}</div>` : "";
@@ -529,6 +539,7 @@ function cardHTML(m, showDate, tokens = []) {
     <article class="card ${m.pinned ? "pinned" : ""}">
       <div class="card-head">
         <span class="time">${esc(when)}${m._dirty && session ? " ・未同期" : ""}</span>
+        <button data-act="chat" data-id="${m.id}" aria-label="AIに質問">💬</button>
         <button data-act="pin" data-id="${m.id}" class="${m.pinned ? "on" : ""}" aria-label="ピン留め">📌</button>
         <button data-act="edit" data-id="${m.id}" aria-label="編集">✏️</button>
       </div>
@@ -562,7 +573,10 @@ function renderTodos() {
       <div class="body">
         <div class="text">${esc(t.text)}</div>
         ${t.due ? `<div class="due ${!t.done && t.due < today ? "overdue" : ""}">期限: ${esc(dueLabel(t))}</div>` : ""}
-        <button class="src" data-act="edit" data-id="${t.memo.id}">元のメモ（${esc(formatDateTime(t.memo.created_at))}）</button>
+        <div class="todo-actions">
+          <button class="src" data-act="edit" data-id="${t.memo.id}">元のメモ（${esc(formatDateTime(t.memo.created_at))}）</button>
+          ${t.due && !t.done ? `<button type="button" class="mini-btn" data-act="cal" data-id="${t.memo.id}" data-index="${t.index}">📅 カレンダーに追加</button>` : ""}
+        </div>
       </div>
     </div>`;
   todosView.innerHTML =
@@ -698,10 +712,12 @@ photoInput.addEventListener("change", async () => {
   }
 });
 
-// ---------- 音声入力 ----------
+// ---------- 音声入力（メモの入力欄と、会話の入力欄で共用） ----------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const micBtn = $("#micBtn");
-let rec = null, recording = false, baseText = "", finalText = "", idleRestarts = 0;
+// 無音で止まったときに自動で聞き直す回数（多いほど、話の途中で考えても止まりにくい）
+const MAX_IDLE_RESTARTS = 6;
+let rec = null, recording = false, baseText = "", finalText = "", idleRestarts = 0, recTarget = null;
 
 function autoSaveEnabled() {
   return localStorage.getItem(LS_AUTOSAVE) !== "0";
@@ -711,17 +727,19 @@ function joinText(a, b) {
   return a && b ? a.replace(/\s+$/, "") + "\n" + b : a + b;
 }
 
-function startRec() {
+// target: { textarea, button, interim(表示欄・なくてもよい), onInput, onDone }
+function startRec(target) {
   if (!SR) {
     toast("このブラウザは音声認識に未対応です。キーボードのマイクボタンで音声入力できます", 5000);
-    compose.focus();
+    target.textarea.focus();
     return;
   }
+  recTarget = target;
   rec = new SR();
   rec.lang = "ja-JP";
   rec.continuous = true;
   rec.interimResults = true;
-  baseText = compose.value;
+  baseText = target.textarea.value;
   finalText = "";
   idleRestarts = 0;
 
@@ -733,10 +751,12 @@ function startRec() {
       if (r.isFinal) finalText += r[0].transcript;
       else interim += r[0].transcript;
     }
-    compose.value = joinText(baseText, finalText);
-    interimEl.textContent = interim;
-    interimEl.hidden = !interim;
-    autoGrow();
+    target.textarea.value = joinText(baseText, finalText);
+    if (target.interim) {
+      target.interim.textContent = interim;
+      target.interim.hidden = !interim;
+    }
+    target.onInput?.();
   };
   rec.onerror = (e) => {
     if (e.error === "not-allowed" || e.error === "service-not-allowed") {
@@ -745,10 +765,10 @@ function startRec() {
     }
   };
   rec.onend = () => {
-    // iPhone は無音が続くと自動で止まるので、録音中なら再開する（無音が続けば終了）
-    if (recording && idleRestarts < 3) {
+    // iPhone は無音が続くと自動で止まるので、録音中なら聞き直す（無音が長く続けば終了）
+    if (recording && idleRestarts < MAX_IDLE_RESTARTS) {
       idleRestarts++;
-      baseText = compose.value;
+      baseText = target.textarea.value;
       finalText = "";
       try { rec.start(); return; } catch {}
     }
@@ -756,8 +776,8 @@ function startRec() {
   };
 
   recording = true;
-  micBtn.classList.add("rec");
-  micBtn.setAttribute("aria-label", "録音を停止");
+  target.button.classList.add("rec");
+  target.button.setAttribute("aria-label", "録音を停止");
   try { rec.start(); } catch (e) { finishRec(); }
 }
 
@@ -767,15 +787,66 @@ function stopRec() {
 }
 
 function finishRec() {
+  const target = recTarget;
   recording = false;
   rec = null;
-  micBtn.classList.remove("rec");
-  micBtn.setAttribute("aria-label", "音声入力");
-  interimEl.hidden = true;
-  if (autoSaveEnabled() && compose.value.trim()) saveCompose();
+  recTarget = null;
+  if (!target) return;
+  target.button.classList.remove("rec");
+  target.button.setAttribute("aria-label", "音声入力");
+  if (target.interim) target.interim.hidden = true;
+  target.onDone?.();
 }
 
-micBtn.addEventListener("click", () => (recording ? stopRec() : startRec()));
+function toggleRec(target) {
+  if (recording) stopRec();
+  else startRec(target);
+}
+
+const composeRecTarget = {
+  textarea: compose, button: micBtn, interim: interimEl, onInput: autoGrow,
+  onDone: () => { if (autoSaveEnabled() && compose.value.trim()) saveCompose(); },
+};
+micBtn.addEventListener("click", () => toggleRec(composeRecTarget));
+
+// ---------- 読み上げ ----------
+let speakingBtn = null;
+
+// 絵文字や記号を除いて、読み上げやすい文にする
+function speakableText(text) {
+  return text.replace(/\p{Extended_Pictographic}/gu, "").replace(/[※・]/g, " ").replace(/\n{2,}/g, "\n");
+}
+
+function speak(text, btn) {
+  if (!("speechSynthesis" in window)) return toast("この端末は読み上げに対応していません");
+  const wasThis = speakingBtn === btn && speechSynthesis.speaking;
+  speechSynthesis.cancel();
+  if (speakingBtn) speakingBtn.classList.remove("speaking");
+  speakingBtn = null;
+  if (wasThis) return; // 読み上げ中にもう一度押したら止める
+  const u = new SpeechSynthesisUtterance(speakableText(text));
+  u.lang = "ja-JP";
+  const voice = speechSynthesis.getVoices().find((v) => v.lang.startsWith("ja"));
+  if (voice) u.voice = voice;
+  u.onend = u.onerror = () => {
+    btn.classList.remove("speaking");
+    if (speakingBtn === btn) speakingBtn = null;
+  };
+  speakingBtn = btn;
+  btn.classList.add("speaking");
+  speechSynthesis.speak(u);
+}
+
+// ---------- カレンダーに追加 ----------
+// サーバーが予定のファイル（.ics）を返す。iPhone では「カレンダーに追加」の画面が開く
+function addToCalendar(m, todo) {
+  if (!supabase) return toast("カレンダー登録は、Supabase の設定後に使えます");
+  const q = new URLSearchParams({
+    ics: "1", title: todo.text, due: todo.due, time: todo.time || "",
+    note: m.text.slice(0, 300),
+  });
+  window.open(`${SUPABASE_URL}/functions/v1/ai-memo?${q}`, "_blank");
+}
 
 // ---------- カード操作 ----------
 document.addEventListener("click", (e) => {
@@ -800,6 +871,15 @@ document.addEventListener("click", (e) => {
       switchView("memos");
       render();
       break;
+    case "speak":
+      speak(m.answer, btn);
+      break;
+    case "chat":
+      openChat(m);
+      break;
+    case "cal":
+      addToCalendar(m, m.todos[Number(btn.dataset.index)]);
+      break;
   }
 });
 
@@ -809,6 +889,104 @@ document.addEventListener("change", (e) => {
   const m = memos[cb.dataset.id];
   m.todos = m.todos.map((t, i) => (i === Number(cb.dataset.index) ? { ...t, done: cb.checked } : t));
   touch(m);
+});
+
+// ---------- AI との会話 ----------
+const chatDialog = $("#chatDialog");
+const chatLog = $("#chatLog");
+const chatText = $("#chatText");
+const chatSend = $("#chatSend");
+const chatMic = $("#chatMic");
+let chatMemoId = null, chatBusy = false, chatPending = "";
+
+function chatGrow() {
+  chatText.style.height = "auto";
+  chatText.style.height = chatText.scrollHeight + "px";
+}
+
+function openChat(m) {
+  chatMemoId = m.id;
+  chatText.value = "";
+  chatGrow();
+  renderChat();
+  chatDialog.showModal();
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function renderChat() {
+  const m = memos[chatMemoId];
+  if (!m) return;
+  const aiBubble = (text, i) => `
+    <div class="bubble ai"><span class="meta">🤖 AI</span>${esc(text)}
+      <br><button type="button" class="mini-btn" data-chat-speak="${i}">🔊 読み上げ</button></div>`;
+  let html = `<div class="bubble memo"><span class="meta">📝 メモ（${esc(formatDateTime(m.created_at))}）</span>${esc(m.text)}</div>`;
+  const texts = [];
+  if (m.answer) { texts.push(m.answer); html += aiBubble(m.answer, texts.length - 1); }
+  for (const t of m.thread || []) {
+    html += `<div class="bubble me">${esc(t.q)}</div>`;
+    texts.push(t.a);
+    html += aiBubble(t.a, texts.length - 1);
+  }
+  if (chatPending) {
+    html += `<div class="bubble me">${esc(chatPending)}</div><div class="bubble ai thinking">🤖 考えています…</div>`;
+  }
+  if (!m.answer && !(m.thread || []).length && !chatPending) {
+    html += `<p class="muted">このメモについて、AIに質問できます（例：「くわしく教えて」「要点を3つにまとめて」）。</p>`;
+  }
+  chatLog.innerHTML = html;
+  chatLog.querySelectorAll("[data-chat-speak]").forEach((b) =>
+    b.addEventListener("click", () => speak(texts[Number(b.dataset.chatSpeak)], b)));
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+async function sendChat() {
+  const m = memos[chatMemoId];
+  const q = chatText.value.trim();
+  if (!m || !q || chatBusy) return;
+  if (!supabase || !session) return toast("AIとの会話は、ログインすると使えます");
+  if (!navigator.onLine) return toast("インターネットにつながっているときに使えます");
+  chatBusy = true;
+  chatSend.disabled = true;
+  chatPending = q;
+  chatText.value = "";
+  chatGrow();
+  renderChat();
+  try {
+    const { data, error } = await supabase.functions.invoke("ai-memo", {
+      body: {
+        action: "followup", text: m.text, created_at: m.created_at,
+        answer: m.answer || "", thread: (m.thread || []).slice(-20), question: q,
+      },
+    });
+    if (error) {
+      chatText.value = q; // 送れなかった質問は入力欄に戻す
+      toast("送れませんでした: " + (await errorMessage(error)), 6000);
+      return;
+    }
+    const cur = memos[chatMemoId];
+    cur.thread = [...(cur.thread || []), { q, a: data.answer, at: new Date().toISOString() }];
+    touch(cur);
+  } finally {
+    chatBusy = false;
+    chatSend.disabled = false;
+    chatPending = "";
+    renderChat();
+  }
+}
+
+chatSend.addEventListener("click", sendChat);
+chatText.addEventListener("input", chatGrow);
+chatText.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChat(); }
+});
+chatMic.addEventListener("click", () => toggleRec({
+  textarea: chatText, button: chatMic, onInput: chatGrow,
+  onDone: () => { if (autoSaveEnabled() && chatText.value.trim()) sendChat(); },
+}));
+$("#chatClose").addEventListener("click", () => chatDialog.close());
+chatDialog.addEventListener("close", () => {
+  if (recording) stopRec();
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
 });
 
 // ---------- 編集ダイアログ ----------
@@ -837,7 +1015,7 @@ $("#editSave").addEventListener("click", () => {
 $("#editDelete").addEventListener("click", () => {
   const m = memos[editingId];
   if (!m || !confirm("このメモを削除しますか？")) return;
-  Object.assign(m, { deleted: true, text: "", answer: "", summary: "", tags: [], keywords: [], todos: [], expenses: [] });
+  Object.assign(m, { deleted: true, text: "", answer: "", summary: "", tags: [], keywords: [], todos: [], expenses: [], thread: [] });
   touch(m);
   editDialog.close();
   toast("削除しました");
@@ -1039,6 +1217,9 @@ function exportAs(kind) {
     body = `# こえメモ（${stamp} 書き出し）\n\n` + list.map((m) => {
       let s = `## ${formatDateTime(m.created_at)}${m.pinned ? " 📌" : ""}\n\n${m.text}\n`;
       if (m.is_question && m.answer) s += `\n> **AIの回答**\n>\n${m.answer.split("\n").map((l) => "> " + l).join("\n")}\n`;
+      for (const t of m.thread || []) {
+        s += `\n**質問**：${t.q}\n\n> ${t.a.split("\n").join("\n> ")}\n`;
+      }
       if (m.todos.length) s += "\n" + m.todos.map((t) => `- [${t.done ? "x" : " "}] ${t.text}${t.due ? `（期限 ${dueLabel(t)}）` : ""}`).join("\n") + "\n";
       if (m.tags.length) s += `\n${m.tags.map((t) => "#" + t).join(" ")}\n`;
       return s;

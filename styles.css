@@ -121,6 +121,35 @@ main > section { max-width: 760px; margin: 0 auto; }
 .todo.done .text { text-decoration: line-through; color: var(--muted); }
 .todo .src { font-size: .75em; color: var(--accent); background: none; border: 0; padding: 0; }
 
+/* 回答の操作・会話 */
+.answer-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.mini-btn {
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 999px; padding: 4px 10px; font-size: .8125em; line-height: 1.4;
+}
+.mini-btn.speaking { background: var(--accent); color: #fff; border-color: var(--accent); }
+.chat-link { margin-top: 8px; }
+.todo-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
+
+.chat-dialog { width: min(96vw, 640px); height: min(88vh, 760px); }
+.chat-dialog[open] { display: flex; }
+.chat { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-bottom: 12px; }
+.chat-head { display: flex; align-items: center; justify-content: space-between; }
+.chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; font-size: calc(15px * var(--memo-scale, 1)); }
+.bubble { max-width: 88%; padding: 8px 12px; border-radius: 14px; white-space: pre-wrap; word-break: break-word; }
+.bubble.me { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+.bubble.ai { align-self: flex-start; background: var(--answer); border: 1px solid var(--answer-line); border-bottom-left-radius: 4px; }
+.bubble.memo { align-self: stretch; max-width: none; background: var(--bg); border: 1px dashed var(--line); font-size: .9em; }
+.bubble .meta { display: block; font-size: .75em; opacity: .75; margin-bottom: 2px; }
+.bubble .mini-btn { margin-top: 6px; }
+.bubble.thinking { opacity: .7; }
+.chat-input { display: flex; gap: 6px; align-items: flex-end; border-top: 1px solid var(--line); padding-top: 8px; }
+#chatText {
+  flex: 1; resize: none; max-height: 30vh; padding: 9px 10px; font-size: 16px; font-family: inherit;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--text);
+}
+.mic-btn.small { width: 42px; height: 42px; box-shadow: none; }
+
 /* 家計 */
 .mini-money { margin-top: 6px; font-size: .875em; }
 .mini-money b { font-weight: 700; }

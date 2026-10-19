@@ -90,6 +90,24 @@
     </form>
   </dialog>
 
+  <!-- AI との会話 -->
+  <dialog id="chatDialog" class="chat-dialog">
+    <div class="sheet chat">
+      <div class="chat-head">
+        <h2>💬 AIと会話</h2>
+        <button type="button" id="chatClose" class="icon-btn" aria-label="閉じる">✕</button>
+      </div>
+      <div id="chatLog" class="chat-log"></div>
+      <div class="chat-input">
+        <textarea id="chatText" rows="1" placeholder="続けて質問"></textarea>
+        <button type="button" id="chatMic" class="mic-btn small" aria-label="音声入力">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+        </button>
+        <button type="button" id="chatSend" class="primary-btn">送信</button>
+      </div>
+    </div>
+  </dialog>
+
   <!-- 写真から記録 -->
   <dialog id="photoDialog">
     <form method="dialog" class="sheet">

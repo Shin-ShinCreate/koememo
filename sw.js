@@ -1,6 +1,6 @@
 // オフラインでもアプリを開けるようにするキャッシュ
 // アプリを更新したら VERSION を上げてください
-const VERSION = "koememo-v8";
+const VERSION = "koememo-v9";
 const APP_FILES = [
   "./", "index.html", "styles.css", "app.js", "config.js", "manifest.webmanifest",
   "icons/icon.svg", "icons/icon-180.png", "icons/icon-192.png", "icons/icon-512.png",
