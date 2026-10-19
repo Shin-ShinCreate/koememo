@@ -79,9 +79,15 @@ const COLUMNS = ["id", "text", "created_at", "updated_at", "pinned", "deleted", 
   "is_question", "answer", "summary", "tags", "keywords", "todos", "expenses", "thread",
   "photos", "deleted_at", "purged"];
 
+// サーバーで「空にしてはいけない」欄の初期値。古い版で作ったメモは、あとから増えた欄の値を持っていないので補う
+const ROW_DEFAULTS = {
+  text: "", pinned: false, deleted: false, ai_status: "pending", is_question: false,
+  answer: "", summary: "", tags: [], keywords: [], todos: [], thread: [], photos: [], purged: false,
+};
+
 function toRow(m) {
   const row = {};
-  for (const k of COLUMNS) row[k] = m[k] ?? null;
+  for (const k of COLUMNS) row[k] = m[k] ?? ROW_DEFAULTS[k] ?? null;
   return row;
 }
 function fromRow(r) {
@@ -110,7 +116,7 @@ function mergeRemote(row) {
 }
 
 // ---------- 同期 ----------
-let syncing = false, syncAgain = false, syncTimer = null, realtimeChannel = null;
+let syncing = false, syncAgain = false, syncTimer = null, realtimeChannel = null, lastSyncError = "";
 
 function scheduleSync() {
   clearTimeout(syncTimer);
@@ -149,9 +155,14 @@ async function sync() {
     }
     if (changed) { persist(); render(); }
     setStatus("同期済み", "ok");
+    lastSyncError = "";
   } catch (e) {
     console.error(e);
     setStatus("同期エラー", "warn");
+    // 原因がわかるように、同じエラーは1回だけ画面に出す
+    const msg = e?.message || String(e);
+    if (msg !== lastSyncError) toast("同期エラー: " + msg, 8000);
+    lastSyncError = msg;
   } finally {
     syncing = false;
     if (syncAgain) { syncAgain = false; sync(); }
